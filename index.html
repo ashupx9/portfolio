@@ -1867,6 +1867,52 @@ document.head.appendChild(s);
   var _gsiScript = document.querySelector('script[src*="accounts.google.com/gsi"]');
   if(_gsiScript) _gsiScript.addEventListener('load', tryInitGSI);
 
+  // ── Detect mobile ──
+  var isMobileDevice = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth <= 768;
+
+  // ── On page load: check if we're returning from a mobile OAuth redirect ──
+  (function handleOAuthReturn(){
+    var hash = window.location.hash || '';
+    var search = window.location.search || '';
+    var combined = hash + '&' + search;
+    if(combined.indexOf('access_token') !== -1 || combined.indexOf('id_token') !== -1){
+      // We came back from Google redirect — parse token immediately
+      var params = {};
+      combined.replace(/^[#?&]/,'').split('&').forEach(function(pair){
+        var kv = pair.split('=');
+        if(kv[0]) params[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1]||'');
+      });
+      // Clean the URL so token isn't visible / re-processed on refresh
+      try{ window.history.replaceState(null,'', window.location.pathname); }catch(e){}
+      // Show gate in loading state while we fetch user info
+      var _gEl = document.getElementById('google-gate');
+      if(_gEl){ _gEl.style.display='flex'; _gEl.style.opacity='1'; }
+      var _gateMain    = document.getElementById('gate-main');
+      var _gateLoading = document.getElementById('gate-loading');
+      if(_gateMain)    _gateMain.style.display = 'none';
+      if(_gateLoading) _gateLoading.classList.add('show');
+      if(params.access_token){
+        fetchUserInfo(params.access_token);
+      } else if(params.id_token){
+        try{
+          var parts = params.id_token.split('.');
+          var pl = JSON.parse(atob(parts[1].replace(/-/g,'+').replace(/_/g,'/')));
+          processUser(pl.name || pl.given_name || 'Friend', pl.email || '');
+        } catch(e){ showFallbackForm(); }
+      } else { showFallbackForm(); }
+    }
+  })();
+
+  // ── Build OAuth URL (shared by popup + redirect) ──
+  function buildAuthUrl(){
+    return 'https://accounts.google.com/o/oauth2/v2/auth' +
+      '?client_id='    + encodeURIComponent(GOOGLE_CLIENT_ID) +
+      '&redirect_uri=' + encodeURIComponent(window.location.origin + window.location.pathname) +
+      '&response_type=token' +
+      '&scope='        + encodeURIComponent('openid email profile') +
+      '&prompt=select_account';
+  }
+
   // ── Button click → show loading → open Google account chooser ──
   window.triggerGoogleSignIn = function(){
     gateMain.style.transition = 'opacity 0.25s';
@@ -1876,6 +1922,16 @@ document.head.appendChild(s);
       gateLoading.classList.add('show');
     }, 250);
 
+    if(isMobileDevice){
+      // Mobile: redirect flow (no popup — popups are blocked on mobile browsers)
+      // Small delay so the loading animation is visible before we navigate away
+      setTimeout(function(){
+        window.location.href = buildAuthUrl();
+      }, 400);
+      return;
+    }
+
+    // Desktop: try GSI One Tap first, fall back to popup
     var tries = 0, maxTries = 40;
     var check = setInterval(function(){
       tries++;
@@ -1901,19 +1957,12 @@ document.head.appendChild(s);
     }, 100);
   };
 
-  // ── OAuth popup — works on ANY domain, no whitelist needed ──
+  // ── OAuth popup — desktop only ──
   function launchOAuthPopup(){
     var w = 480, h = 580;
     var left = Math.round(window.screenX + (window.outerWidth  - w) / 2);
     var top  = Math.round(window.screenY + (window.outerHeight - h) / 2);
-    var authUrl =
-      'https://accounts.google.com/o/oauth2/v2/auth' +
-      '?client_id='    + encodeURIComponent(GOOGLE_CLIENT_ID) +
-      '&redirect_uri=' + encodeURIComponent(window.location.origin + window.location.pathname) +
-      '&response_type=token' +
-      '&scope='        + encodeURIComponent('openid email profile') +
-      '&prompt=select_account';
-    var popup = window.open(authUrl,'gauth','width='+w+',height='+h+',left='+left+',top='+top+',toolbar=no,menubar=no');
+    var popup = window.open(buildAuthUrl(),'gauth','width='+w+',height='+h+',left='+left+',top='+top+',toolbar=no,menubar=no');
     if(!popup){
       // Popup blocked — show fallback
       gateLoading.classList.remove('show');
@@ -1926,7 +1975,6 @@ document.head.appendChild(s);
       try{
         if(!popup || popup.closed){
           clearInterval(poll);
-          // User closed popup without signing in → show retry button
           showFallbackForm();
           return;
         }
